@@ -58,6 +58,8 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.Consumer;
 
 /**
  * Transport action for field capabilities requests
@@ -101,13 +103,28 @@ public class TransportFieldCapabilitiesAction extends HandledTransportAction<Fie
         final int totalNumRequest = concreteIndices.size() + remoteClusterIndices.size();
         final CountDown completionCounter = new CountDown(totalNumRequest);
         final List<FieldCapabilitiesIndexResponse> indexResponses = Collections.synchronizedList(new ArrayList<>());
+        final AtomicBoolean finished = new AtomicBoolean();
         final Runnable onResponse = () -> {
             if (completionCounter.countDown()) {
-                if (request.isMergeResults()) {
-                    listener.onResponse(merge(indexResponses, request.includeUnmapped()));
-                } else {
-                    listener.onResponse(new FieldCapabilitiesResponse(indexResponses));
+                if (finished.compareAndSet(false, true)) {
+                    if (request.isMergeResults()) {
+                        listener.onResponse(merge(indexResponses, request.includeUnmapped()));
+                    } else {
+                        listener.onResponse(new FieldCapabilitiesResponse(indexResponses));
+                    }
                 }
+            }
+        };
+        // Concrete dynamic_properties names are a per-shard fact. A missing active copy must fail the request
+        // instead of dropping that index and returning a partial field list.
+        final Consumer<Exception> onFailure = e -> {
+            if (request.includeDynamicProperties()) {
+                if (finished.compareAndSet(false, true)) {
+                    listener.onFailure(e);
+                }
+            } else {
+                // TODO we should somehow inform the user that we failed
+                onResponse.run();
             }
         };
         if (totalNumRequest == 0) {
@@ -124,13 +141,19 @@ public class TransportFieldCapabilitiesAction extends HandledTransportAction<Fie
 
                 @Override
                 public void onFailure(Exception e) {
-                    // TODO we should somehow inform the user that we failed
-                    onResponse.run();
+                    onFailure.accept(e);
                 }
             };
             for (String index : concreteIndices) {
                 shardAction.execute(
-                    new FieldCapabilitiesIndexRequest(request.fields(), index, localIndices, request.indexFilter(), nowInMillis),
+                    new FieldCapabilitiesIndexRequest(
+                        request.fields(),
+                        index,
+                        localIndices,
+                        request.indexFilter(),
+                        nowInMillis,
+                        request.includeDynamicProperties()
+                    ),
                     innerListener
                 );
             }
@@ -148,6 +171,7 @@ public class TransportFieldCapabilitiesAction extends HandledTransportAction<Fie
                 remoteRequest.fields(request.fields());
                 remoteRequest.indexFilter(request.indexFilter());
                 remoteRequest.nowInMillis(nowInMillis);
+                remoteRequest.includeDynamicProperties(request.includeDynamicProperties());
                 remoteClusterClient.fieldCaps(remoteRequest, ActionListener.wrap(response -> {
                     for (FieldCapabilitiesIndexResponse res : response.getIndexResponses()) {
                         indexResponses.add(
@@ -159,7 +183,7 @@ public class TransportFieldCapabilitiesAction extends HandledTransportAction<Fie
                         );
                     }
                     onResponse.run();
-                }, failure -> onResponse.run()));
+                }, onFailure::accept));
             }
         }
     }

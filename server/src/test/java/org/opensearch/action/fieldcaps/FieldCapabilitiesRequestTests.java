@@ -65,6 +65,7 @@ public class FieldCapabilitiesRequestTests extends AbstractWireSerializingTestCa
             request.indicesOptions(randomBoolean() ? IndicesOptions.strictExpand() : IndicesOptions.lenientExpandOpen());
         }
         request.includeUnmapped(randomBoolean());
+        request.includeDynamicProperties(randomBoolean());
         return request;
     }
 
@@ -93,6 +94,7 @@ public class FieldCapabilitiesRequestTests extends AbstractWireSerializingTestCa
         });
         mutators.add(request -> request.setMergeResults(!request.isMergeResults()));
         mutators.add(request -> request.includeUnmapped(!request.includeUnmapped()));
+        mutators.add(request -> request.includeDynamicProperties(!request.includeDynamicProperties()));
 
         FieldCapabilitiesRequest mutatedInstance = copyInstance(instance);
         Consumer<FieldCapabilitiesRequest> mutator = randomFrom(mutators);

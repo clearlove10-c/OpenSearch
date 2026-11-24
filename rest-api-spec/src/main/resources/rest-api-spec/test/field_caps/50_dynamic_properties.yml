@@ -1,0 +1,78 @@
+---
+"Dynamic properties stay out of field caps until requested":
+  - do:
+      indices.create:
+        index: dyn_props
+        body:
+          settings:
+            index:
+              number_of_shards: 1
+              number_of_replicas: 0
+          mappings:
+            dynamic_properties:
+              "*_i":
+                type: long
+              "*_s":
+                type: keyword
+            properties:
+              title:
+                type: text
+
+  - do:
+      index:
+        index: dyn_props
+        id: "1"
+        refresh: true
+        body:
+          title: hello
+          count_i: 5
+          name_s: alpha
+
+  - do:
+      indices.get_mapping:
+        index: dyn_props
+  - is_false: dyn_props.mappings.properties.count_i
+  - is_false: dyn_props.mappings.properties.name_s
+  - is_true: dyn_props.mappings.properties.title
+
+  - do:
+      field_caps:
+        index: dyn_props
+        fields: ["*"]
+  - match: { fields.title.text.searchable: true }
+  - is_false: fields.count_i
+  - is_false: fields.name_s
+
+  - do:
+      field_caps:
+        index: dyn_props
+        fields: ["*"]
+        include_dynamic_properties: true
+  - match: { fields.title.text.searchable: true }
+  - match: { fields.count_i.long.searchable: true }
+  - match: { fields.count_i.long.aggregatable: true }
+  - match: { fields.name_s.keyword.searchable: true }
+  - match: { fields.name_s.keyword.aggregatable: true }
+
+  - do:
+      field_caps:
+        index: dyn_props
+        fields: ["*_i"]
+        include_dynamic_properties: true
+  - match: { fields.count_i.long.type: long }
+  - is_false: fields.name_s
+  - is_false: fields.title
+
+  - do:
+      field_caps:
+        index: dyn_props
+        fields: ["never_seen_i"]
+  - match: { fields.never_seen_i.long.type: long }
+
+  - do:
+      field_caps:
+        index: dyn_props
+        fields: ["never_seen_i"]
+        include_dynamic_properties: true
+  - match: { fields.never_seen_i.long.type: long }
+  - is_false: fields.count_i

@@ -32,6 +32,7 @@
 
 package org.opensearch.action.fieldcaps;
 
+import org.opensearch.Version;
 import org.opensearch.action.ActionRequest;
 import org.opensearch.action.ActionRequestValidationException;
 import org.opensearch.action.IndicesRequest;
@@ -64,6 +65,11 @@ public final class FieldCapabilitiesRequest extends ActionRequest implements Ind
     private IndicesOptions indicesOptions = IndicesOptions.strictExpandOpen();
     private String[] fields = Strings.EMPTY_ARRAY;
     private boolean includeUnmapped = false;
+    /**
+     * When true, also list concrete fields created by {@code dynamic_properties} and present in shard {@code FieldInfos}.
+     * Defaults to false so {@code _field_caps} stays limited to the cluster-state mapping.
+     */
+    private boolean includeDynamicProperties = false;
     // pkg private API mainly for cross cluster search to signal that we do multiple reductions ie. the results should not be merged
     private boolean mergeResults = true;
     private QueryBuilder indexFilter;
@@ -78,6 +84,9 @@ public final class FieldCapabilitiesRequest extends ActionRequest implements Ind
         includeUnmapped = in.readBoolean();
         indexFilter = in.readOptionalNamedWriteable(QueryBuilder.class);
         nowInMillis = in.readOptionalLong();
+        if (in.getVersion().onOrAfter(Version.V_3_11_0)) {
+            includeDynamicProperties = in.readBoolean();
+        }
     }
 
     public FieldCapabilitiesRequest() {}
@@ -111,6 +120,9 @@ public final class FieldCapabilitiesRequest extends ActionRequest implements Ind
         out.writeBoolean(includeUnmapped);
         out.writeOptionalNamedWriteable(indexFilter);
         out.writeOptionalLong(nowInMillis);
+        if (out.getVersion().onOrAfter(Version.V_3_11_0)) {
+            out.writeBoolean(includeDynamicProperties);
+        }
     }
 
     @Override
@@ -157,6 +169,16 @@ public final class FieldCapabilitiesRequest extends ActionRequest implements Ind
         return this;
     }
 
+    /**
+     * When {@code true}, the response also includes concrete fields introduced by {@code dynamic_properties}
+     * that are visible on an active copy of each shard. Defaults to {@code false}. {@code fields} still
+     * selects which names are returned; an exact field name keeps the mapping-based result.
+     */
+    public FieldCapabilitiesRequest includeDynamicProperties(boolean includeDynamicProperties) {
+        this.includeDynamicProperties = includeDynamicProperties;
+        return this;
+    }
+
     @Override
     public String[] indices() {
         return indices;
@@ -174,6 +196,10 @@ public final class FieldCapabilitiesRequest extends ActionRequest implements Ind
 
     public boolean includeUnmapped() {
         return includeUnmapped;
+    }
+
+    public boolean includeDynamicProperties() {
+        return includeDynamicProperties;
     }
 
     /**
@@ -211,6 +237,7 @@ public final class FieldCapabilitiesRequest extends ActionRequest implements Ind
         if (o == null || getClass() != o.getClass()) return false;
         FieldCapabilitiesRequest that = (FieldCapabilitiesRequest) o;
         return includeUnmapped == that.includeUnmapped
+            && includeDynamicProperties == that.includeDynamicProperties
             && mergeResults == that.mergeResults
             && Arrays.equals(indices, that.indices)
             && indicesOptions.equals(that.indicesOptions)
@@ -221,7 +248,7 @@ public final class FieldCapabilitiesRequest extends ActionRequest implements Ind
 
     @Override
     public int hashCode() {
-        int result = Objects.hash(indicesOptions, includeUnmapped, mergeResults, indexFilter, nowInMillis);
+        int result = Objects.hash(indicesOptions, includeUnmapped, includeDynamicProperties, mergeResults, indexFilter, nowInMillis);
         result = 31 * result + Arrays.hashCode(indices);
         result = 31 * result + Arrays.hashCode(fields);
         return result;

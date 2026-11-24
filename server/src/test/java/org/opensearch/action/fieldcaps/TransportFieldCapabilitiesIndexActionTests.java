@@ -8,11 +8,14 @@
 
 package org.opensearch.action.fieldcaps;
 
+import org.opensearch.cluster.metadata.IndexMetadata;
+import org.opensearch.cluster.routing.OperationRouting;
 import org.opensearch.common.settings.Settings;
 import org.opensearch.common.util.FeatureFlags;
 import org.opensearch.common.xcontent.XContentFactory;
 import org.opensearch.core.xcontent.MediaTypeRegistry;
 import org.opensearch.index.IndexSettings;
+import org.opensearch.index.query.QueryBuilders;
 import org.opensearch.index.engine.dataformat.stub.MockCommitterEnginePlugin;
 import org.opensearch.index.engine.dataformat.stub.MockDataFormatPlugin;
 import org.opensearch.plugins.Plugin;
@@ -20,7 +23,9 @@ import org.opensearch.test.InternalSettingsPlugin;
 import org.opensearch.test.OpenSearchSingleNodeTestCase;
 
 import java.util.Collection;
+import java.util.HashSet;
 import java.util.Map;
+import java.util.Set;
 
 import static org.opensearch.test.hamcrest.OpenSearchAssertions.assertAcked;
 
@@ -217,5 +222,187 @@ public class TransportFieldCapabilitiesIndexActionTests extends OpenSearchSingle
             "doc-values-only field must not be searchable on a normal index",
             normalResponse.get().get("num").get("long").isSearchable()
         );
+    }
+
+    public void testDynamicPropertiesStayHiddenUntilRequested() throws Exception {
+        createDynamicPropertiesIndex("dyn", 1, 0);
+
+        client().prepareIndex("dyn")
+            .setId("1")
+            .setSource("{\"title\":\"hello\",\"count_i\":5,\"name_s\":\"alpha\"}", MediaTypeRegistry.JSON)
+            .get();
+        client().admin().indices().prepareRefresh("dyn").get();
+
+        String mapping = client().admin().indices().prepareGetMappings("dyn").get().getMappings().get("dyn").source().string();
+        assertFalse(mapping.contains("count_i"));
+        assertFalse(mapping.contains("name_s"));
+
+        FieldCapabilitiesResponse hidden = fieldCaps("dyn", false, "*");
+        assertTrue(hidden.get().containsKey("title"));
+        assertFalse(hidden.get().containsKey("count_i"));
+        assertFalse(hidden.get().containsKey("name_s"));
+
+        FieldCapabilitiesResponse visible = fieldCaps("dyn", true, "*");
+        assertTrue(visible.get().containsKey("title"));
+        assertLongField(visible, "count_i");
+        assertKeywordField(visible, "name_s");
+        Set<String> expected = new HashSet<>(hidden.get().keySet());
+        expected.add("count_i");
+        expected.add("name_s");
+        assertEquals(expected, visible.get().keySet());
+    }
+
+    public void testIncludeDynamicPropertiesFieldPatternAndExactName() throws Exception {
+        createDynamicPropertiesIndex("dyn", 1, 0);
+        client().prepareIndex("dyn")
+            .setId("1")
+            .setSource("{\"obj\":{\"nested_i\":7},\"count_i\":1,\"name_s\":\"alpha\"}", MediaTypeRegistry.JSON)
+            .get();
+        client().admin().indices().prepareRefresh("dyn").get();
+
+        FieldCapabilitiesResponse onlyLongs = fieldCaps("dyn", true, "*_i");
+        assertLongField(onlyLongs, "count_i");
+        assertLongField(onlyLongs, "obj.nested_i");
+        assertFalse(onlyLongs.get().containsKey("name_s"));
+        assertFalse(onlyLongs.get().containsKey("title"));
+
+        // An exact name is resolved from the dynamic_properties pattern even when that name was never indexed.
+        FieldCapabilitiesResponse exactWithoutFlag = fieldCaps("dyn", false, "never_seen_i");
+        FieldCapabilitiesResponse exactWithFlag = fieldCaps("dyn", true, "never_seen_i");
+        assertLongField(exactWithoutFlag, "never_seen_i");
+        assertLongField(exactWithFlag, "never_seen_i");
+        assertEquals(exactWithoutFlag.get().keySet(), exactWithFlag.get().keySet());
+
+        FieldCapabilitiesResponse wildcardMiss = fieldCaps("dyn", true, "other*");
+        assertFalse(wildcardMiss.get().containsKey("count_i"));
+        assertFalse(wildcardMiss.get().containsKey("never_seen_i"));
+    }
+
+    public void testIncludeDynamicPropertiesUnionsShardsAndHidesUnrefreshedFields() throws Exception {
+        createDynamicPropertiesIndex("dyn", 2, 1);
+        IndexMetadata index = client().admin().cluster().prepareState().get().getState().metadata().index("dyn");
+        String shard0Routing = routingForShard(index, 0);
+        String shard1Routing = routingForShard(index, 1);
+
+        client().prepareIndex("dyn").setId("doc-0").setRouting(shard0Routing).setSource("{\"count_i\":1}", MediaTypeRegistry.JSON).get();
+        client().prepareIndex("dyn")
+            .setId("doc-1")
+            .setRouting(shard1Routing)
+            .setSource("{\"name_s\":\"only-on-shard-1\"}", MediaTypeRegistry.JSON)
+            .get();
+
+        FieldCapabilitiesResponse beforeRefresh = fieldCaps("dyn", true, "*");
+        assertFalse(beforeRefresh.get().containsKey("count_i"));
+        assertFalse(beforeRefresh.get().containsKey("name_s"));
+
+        client().admin().indices().prepareRefresh("dyn").get();
+
+        FieldCapabilitiesResponse afterRefresh = fieldCaps("dyn", true, "*");
+        assertLongField(afterRefresh, "count_i");
+        assertKeywordField(afterRefresh, "name_s");
+        assertTrue(afterRefresh.get().containsKey("title"));
+    }
+
+    public void testIncludeDynamicPropertiesKeptWhenIndexFilterMatchesNothing() throws Exception {
+        createDynamicPropertiesIndex("dyn", 1, 0);
+        assertAcked(
+            client().admin()
+                .indices()
+                .preparePutMapping("dyn")
+                .setSource("{\"properties\":{\"timestamp\":{\"type\":\"date\"}}}", MediaTypeRegistry.JSON)
+        );
+        client().prepareIndex("dyn")
+            .setId("1")
+            .setSource("{\"timestamp\":\"2015-07-08\",\"title\":\"hello\",\"count_i\":5}", MediaTypeRegistry.JSON)
+            .get();
+        client().admin().indices().prepareRefresh("dyn").get();
+
+        FieldCapabilitiesResponse withoutFlag = client().fieldCaps(
+            new FieldCapabilitiesRequest().fields("*")
+                .indices("dyn")
+                .indexFilter(QueryBuilders.rangeQuery("timestamp").gte("2099-01-01"))
+        ).actionGet();
+        assertEquals(0, withoutFlag.getIndices().length);
+        assertFalse(withoutFlag.get().containsKey("count_i"));
+
+        FieldCapabilitiesResponse withFlag = client().fieldCaps(
+            new FieldCapabilitiesRequest().fields("*")
+                .indices("dyn")
+                .includeDynamicProperties(true)
+                .indexFilter(QueryBuilders.rangeQuery("timestamp").gte("2099-01-01"))
+        ).actionGet();
+        assertArrayEquals(new String[] { "dyn" }, withFlag.getIndices());
+        assertLongField(withFlag, "count_i");
+        // Mapping caps stay tied to shards that can match the filter. This request only keeps the
+        // concrete dynamic_properties fields that were read from FieldInfos.
+        assertFalse(withFlag.get().containsKey("title"));
+        assertFalse(withFlag.get().containsKey("timestamp"));
+    }
+
+    private void createDynamicPropertiesIndex(String index, int shards, int replicas) throws Exception {
+        String mapping = XContentFactory.jsonBuilder()
+            .startObject()
+            .startObject("dynamic_properties")
+            .startObject("*_i")
+            .field("type", "long")
+            .endObject()
+            .startObject("*_s")
+            .field("type", "keyword")
+            .endObject()
+            .endObject()
+            .startObject("properties")
+            .startObject("title")
+            .field("type", "text")
+            .endObject()
+            .startObject("obj")
+            .field("type", "object")
+            .endObject()
+            .endObject()
+            .endObject()
+            .toString();
+        assertAcked(
+            client().admin()
+                .indices()
+                .prepareCreate(index)
+                .setSettings(
+                    Settings.builder()
+                        .put(IndexMetadata.SETTING_NUMBER_OF_SHARDS, shards)
+                        .put(IndexMetadata.SETTING_NUMBER_OF_REPLICAS, replicas)
+                        .put("index.refresh_interval", "-1")
+                )
+                .setMapping(mapping)
+        );
+    }
+
+    private FieldCapabilitiesResponse fieldCaps(String index, boolean includeDynamicProperties, String... fields) {
+        return client().fieldCaps(
+            new FieldCapabilitiesRequest().fields(fields).indices(index).includeDynamicProperties(includeDynamicProperties)
+        ).actionGet();
+    }
+
+    private static String routingForShard(IndexMetadata index, int shardId) {
+        for (int i = 0; i < 10_000; i++) {
+            String routing = "route-" + i;
+            if (OperationRouting.generateShardId(index, "doc-" + shardId, routing) == shardId) {
+                return routing;
+            }
+        }
+        throw new AssertionError("unable to find routing for shard " + shardId);
+    }
+
+    private static void assertLongField(FieldCapabilitiesResponse response, String field) {
+        assertTrue("expected " + field + " in " + response.get().keySet(), response.get().containsKey(field));
+        FieldCapabilities caps = response.get().get(field).get("long");
+        assertNotNull(caps);
+        assertTrue(caps.isSearchable());
+        assertTrue(caps.isAggregatable());
+    }
+
+    private static void assertKeywordField(FieldCapabilitiesResponse response, String field) {
+        assertTrue("expected " + field + " in " + response.get().keySet(), response.get().containsKey(field));
+        FieldCapabilities caps = response.get().get(field).get("keyword");
+        assertNotNull(caps);
+        assertTrue(caps.isSearchable());
+        assertTrue(caps.isAggregatable());
     }
 }

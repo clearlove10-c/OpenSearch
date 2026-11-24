@@ -58,6 +58,11 @@
         "type":"boolean",
         "default":false,
         "description":"Indicates whether unmapped fields should be included in the response."
+      },
+      "include_dynamic_properties":{
+        "type":"boolean",
+        "default":false,
+        "description":"When true, also return concrete fields created by dynamic_properties that are present in the index. fields still selects which names are returned. An exact field name keeps the mapping-based result."
       }
     },
     "body":{

@@ -32,6 +32,7 @@
 
 package org.opensearch.action.fieldcaps;
 
+import org.opensearch.Version;
 import org.opensearch.action.ActionRequest;
 import org.opensearch.action.ActionRequestValidationException;
 import org.opensearch.action.IndicesRequest;
@@ -59,6 +60,7 @@ public class FieldCapabilitiesIndexRequest extends ActionRequest implements Indi
     private final OriginalIndices originalIndices;
     private final QueryBuilder indexFilter;
     private final long nowInMillis;
+    private final boolean includeDynamicProperties;
 
     private ShardId shardId;
 
@@ -71,6 +73,7 @@ public class FieldCapabilitiesIndexRequest extends ActionRequest implements Indi
         originalIndices = OriginalIndices.readOriginalIndices(in);
         indexFilter = in.readOptionalNamedWriteable(QueryBuilder.class);
         nowInMillis = in.readLong();
+        includeDynamicProperties = in.getVersion().onOrAfter(Version.V_3_11_0) && in.readBoolean();
     }
 
     FieldCapabilitiesIndexRequest(
@@ -78,7 +81,8 @@ public class FieldCapabilitiesIndexRequest extends ActionRequest implements Indi
         String index,
         OriginalIndices originalIndices,
         QueryBuilder indexFilter,
-        long nowInMillis
+        long nowInMillis,
+        boolean includeDynamicProperties
     ) {
         if (fields == null || fields.length == 0) {
             throw new IllegalArgumentException("specified fields can't be null or empty");
@@ -88,6 +92,7 @@ public class FieldCapabilitiesIndexRequest extends ActionRequest implements Indi
         this.originalIndices = originalIndices;
         this.indexFilter = indexFilter;
         this.nowInMillis = nowInMillis;
+        this.includeDynamicProperties = includeDynamicProperties;
     }
 
     public String[] fields() {
@@ -120,9 +125,21 @@ public class FieldCapabilitiesIndexRequest extends ActionRequest implements Indi
         return nowInMillis;
     }
 
+    public boolean includeDynamicProperties() {
+        return includeDynamicProperties;
+    }
+
     FieldCapabilitiesIndexRequest shardId(ShardId shardId) {
         this.shardId = shardId;
         return this;
+    }
+
+    /**
+     * Copy for a single shard send. {@link #shardId} is mutable and must not be shared across concurrent shard requests.
+     */
+    FieldCapabilitiesIndexRequest forShard(ShardId shardId) {
+        return new FieldCapabilitiesIndexRequest(fields, index, originalIndices, indexFilter, nowInMillis, includeDynamicProperties)
+            .shardId(shardId);
     }
 
     @Override
@@ -134,6 +151,9 @@ public class FieldCapabilitiesIndexRequest extends ActionRequest implements Indi
         OriginalIndices.writeOriginalIndices(originalIndices, out);
         out.writeOptionalNamedWriteable(indexFilter);
         out.writeLong(nowInMillis);
+        if (out.getVersion().onOrAfter(Version.V_3_11_0)) {
+            out.writeBoolean(includeDynamicProperties);
+        }
     }
 
     @Override

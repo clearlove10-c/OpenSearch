@@ -61,6 +61,14 @@ public class FieldCapabilitiesRequestBuilder extends ActionRequestBuilder<FieldC
         return this;
     }
 
+    /**
+     * Also return concrete {@code dynamic_properties} fields present in the index.
+     */
+    public FieldCapabilitiesRequestBuilder setIncludeDynamicProperties(boolean includeDynamicProperties) {
+        request().includeDynamicProperties(includeDynamicProperties);
+        return this;
+    }
+
     public FieldCapabilitiesRequestBuilder setIndexFilter(QueryBuilder indexFilter) {
         request().indexFilter(indexFilter);
         return this;
